@@ -3,95 +3,128 @@
 # Copyright 2023 LunarG, Inc.
 #
 # SPDX-License-Identifier: Apache-2.0
+cmake_minimum_required(VERSION 3.22.1)
 
-add_library(VulkanCompilerConfiguration INTERFACE)
-add_library(Vulkan::CompilerConfiguration ALIAS VulkanCompilerConfiguration)
-if(${CMAKE_CXX_COMPILER_ID} MATCHES "(GNU|Clang)")
-    target_compile_options(VulkanCompilerConfiguration INTERFACE
-        -Wpedantic
-        -Wunreachable-code
-        -Wunused-function
-        -Wall
-        -Wextra
-        -Wpointer-arith
-        -Wextra-semi
+# The VERSION field is generated with the "--generated-version" flag in the generate_source.py script
+project(VUL VERSION 1.4.362 LANGUAGES CXX)
+
+set_property(GLOBAL PROPERTY USE_FOLDERS ON) # Remove when min is 3.26, see CMP0143
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_CXX_VISIBILITY_PRESET "hidden")
+set(CMAKE_C_VISIBILITY_PRESET "hidden")
+set(CMAKE_VISIBILITY_INLINES_HIDDEN "YES")
+
+# This variable enables downstream users to customize the target API
+# variant (e.g. Vulkan SC)
+set(API_TYPE "vulkan")
+
+add_subdirectory(scripts)
+
+find_package(VulkanHeaders ${PROJECT_VERSION} CONFIG)
+
+# Workaround AppleClang using the wrong headers when there are headers in /usr/local/include
+if (CMAKE_CXX_COMPILER_ID STREQUAL AppleClang AND TARGET Vulkan::Headers AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.25)
+    get_target_property(vulkan_headers_aliased Vulkan::Headers ALIASED_TARGET)
+    if (NOT vulkan_headers_aliased)
+        set_target_properties(Vulkan::Headers PROPERTIES SYSTEM OFF)
+    endif()
+endif()
+
+option(VUL_ENABLE_ASAN "Use address sanitization")
+if (VUL_ENABLE_ASAN)
+    add_compile_options(-fsanitize=address)
+    if (NOT MSVC)
+        add_link_options(-fsanitize=address)
+    endif()
+endif()
+
+option(VUL_ENABLE_UBSAN "Use undefined behavior sanitization")
+if (VUL_ENABLE_UBSAN)
+    if (NOT MSVC)
+        add_compile_options(-fsanitize=undefined)
+        add_link_options(-fsanitize=undefined)
+    endif()
+endif()
+
+add_subdirectory(src)
+add_subdirectory(include)
+
+if (PROJECT_IS_TOP_LEVEL)
+    option(BUILD_TESTS "Build tests")
+    if (BUILD_TESTS)
+        enable_testing()
+        add_subdirectory(tests)
+    endif()
+endif()
+
+option(VUL_ENABLE_INSTALL "Enable install" ${PROJECT_IS_TOP_LEVEL})
+if (VUL_ENABLE_INSTALL)
+
+    include(GNUInstallDirs)
+    include(CMakePackageConfigHelpers)
+
+    install(
+        DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/vulkan/"
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/vulkan"
     )
-    if(${CMAKE_CXX_COMPILER_ID} MATCHES "Clang")
-        target_compile_options(VulkanCompilerConfiguration INTERFACE
-            -Wunreachable-code-return
-            -Wconversion
-            -Wimplicit-fallthrough
-            -Wstring-conversion
-        )
-    endif()
-elseif(MSVC)
-    target_compile_options(VulkanCompilerConfiguration INTERFACE
-        /W4
-        /we5038 # Enable warning about MIL ordering in constructors
-	/wd4324 # Disable warning about alignment padding
+
+    # Create VulkanUtilityLibraries-targets.cmake
+    set_target_properties(VulkanLayerSettings PROPERTIES EXPORT_NAME "LayerSettings")
+    set_target_properties(VulkanUtilityHeaders PROPERTIES EXPORT_NAME "UtilityHeaders")
+    set_target_properties(VulkanSafeStruct PROPERTIES EXPORT_NAME "SafeStruct")
+    set_target_properties(VulkanCompilerConfiguration PROPERTIES EXPORT_NAME "CompilerConfiguration")
+    install(
+        TARGETS VulkanLayerSettings VulkanUtilityHeaders VulkanSafeStruct VulkanCompilerConfiguration
+        EXPORT VulkanUtilityLibraries-targets
+        INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    )
+    install(
+        EXPORT VulkanUtilityLibraries-targets
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/VulkanUtilityLibraries
+        NAMESPACE Vulkan::
     )
 
-    # Enforce stricter ISO C++
-    target_compile_options(VulkanCompilerConfiguration INTERFACE /permissive-)
+    # Create VulkanUtilityLibrariesConfig.cmake
+    set(VUL_EXPORT_TARGETS ${CMAKE_INSTALL_LIBDIR}/cmake/VulkanUtilityLibraries/VulkanUtilityLibraries-targets.cmake)
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/VulkanUtilityLibrariesConfig.cmake.in" [=[
+        include(CMakeFindDependencyMacro)
+        # NOTE: Because VulkanHeaders is a PUBLIC dependency it needs to be found prior to VulkanUtilityLibraries
+        find_dependency(VulkanHeaders @PROJECT_VERSION@ REQUIRED)
 
-    # Speed up Visual Studio builds
-    if (MSVC_IDE)
-        target_compile_options(VulkanCompilerConfiguration INTERFACE /MP)
-    endif()
+        @PACKAGE_INIT@
+
+        include(@PACKAGE_VUL_EXPORT_TARGETS@)
+    ]=])
+
+    configure_package_config_file(
+        ${CMAKE_CURRENT_BINARY_DIR}/VulkanUtilityLibrariesConfig.cmake.in
+        ${CMAKE_CURRENT_BINARY_DIR}/VulkanUtilityLibrariesConfig.cmake
+        INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/VulkanUtilityLibraries
+        PATH_VARS VUL_EXPORT_TARGETS
+        NO_SET_AND_CHECK_MACRO
+        NO_CHECK_REQUIRED_COMPONENTS_MACRO
+    )
+
+    write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/VulkanUtilityLibrariesConfigVersion.cmake
+        VERSION ${PROJECT_VERSION}
+        COMPATIBILITY AnyNewerVersion)
+
+    install(FILES
+            ${CMAKE_CURRENT_BINARY_DIR}/VulkanUtilityLibrariesConfig.cmake
+            ${CMAKE_CURRENT_BINARY_DIR}/VulkanUtilityLibrariesConfigVersion.cmake
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/VulkanUtilityLibraries)
 endif()
 
-target_compile_definitions(VulkanCompilerConfiguration INTERFACE VK_ENABLE_BETA_EXTENSIONS)
-if(WIN32)
-    # Minimize what Windows.h leaks
-    target_compile_definitions(VulkanCompilerConfiguration INTERFACE NOMINMAX WIN32_LEAN_AND_MEAN)
-
-    target_compile_definitions(VulkanCompilerConfiguration INTERFACE VK_USE_PLATFORM_WIN32_KHR)
-elseif(ANDROID)
-    target_compile_definitions(VulkanCompilerConfiguration INTERFACE VK_USE_PLATFORM_ANDROID_KHR)
-elseif(APPLE)
-    target_compile_definitions(VulkanCompilerConfiguration INTERFACE VK_USE_PLATFORM_METAL_EXT)
-    if (IOS)
-        target_compile_definitions(VulkanCompilerConfiguration INTERFACE VK_USE_PLATFORM_IOS_MVK)
-    else()
-        target_compile_definitions(VulkanCompilerConfiguration INTERFACE VK_USE_PLATFORM_MACOS_MVK)
-    endif()
-else()
-    message(DEBUG "Figure out how to gracefully handle Linux|BSD WSI...")
-    
-    #option(BUILD_WSI_XCB_SUPPORT "Build XCB WSI support" ON)
-    #option(BUILD_WSI_XLIB_SUPPORT "Build Xlib WSI support" ON)
-    #option(BUILD_WSI_WAYLAND_SUPPORT "Build Wayland WSI support" ON)
-
-    #find_package(PkgConfig REQUIRED QUIET) # Use PkgConfig to find Linux system libraries
-
-    #if(BUILD_WSI_XCB_SUPPORT)
-    #    pkg_check_modules(XCB REQUIRED QUIET IMPORTED_TARGET xcb)
-    #    target_compile_definitions(VulkanCompilerConfiguration INTERFACE VK_USE_PLATFORM_XCB_KHR)
-    #endif()
-
-    #if(BUILD_WSI_XLIB_SUPPORT)
-    #    pkg_check_modules(X11 REQUIRED QUIET IMPORTED_TARGET x11)
-    #    target_compile_definitions(VulkanCompilerConfiguration INTERFACE VK_USE_PLATFORM_XLIB_KHR VK_USE_PLATFORM_XLIB_XRANDR_EXT)
-    #endif()
-
-    #if(BUILD_WSI_WAYLAND_SUPPORT)
-    #    pkg_check_modules(WAYlAND_CLIENT QUIET REQUIRED IMPORTED_TARGET wayland-client)
-    #    target_compile_definitions(VulkanCompilerConfiguration INTERFACE VK_USE_PLATFORM_WAYLAND_KHR)
-    #endif()
+option(VUL_CODEGEN "Enable Vulkan-Utility-Libraries code generation")
+if(VUL_CODEGEN)
+    find_package(Python3 REQUIRED)
+    add_custom_target(vul_codegen
+        COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/scripts/generate_source.py
+            "${VULKAN_HEADERS_INSTALL_DIR}/${CMAKE_INSTALL_DATADIR}/vulkan/registry"
+            --generated-version ${VulkanHeaders_VERSION} --api ${API_TYPE}
+    )
 endif()
-
-option(VUL_WERROR "Treat compiler warnings as errors")
-if (VUL_WERROR)
-    if (MSVC)
-        target_compile_options(VulkanCompilerConfiguration INTERFACE /WX)
-        target_link_options(VulkanCompilerConfiguration INTERFACE /WX)
-    else()
-        target_compile_options(VulkanCompilerConfiguration INTERFACE -Werror)
-        # TODO: Figure out linker warnings as errors for non-WIN32
-    endif()
-endif()
-
-option(VUL_MOCK_ANDROID "Enable building for Android on desktop for testing with MockICD setup")
-
-add_subdirectory(layer)
-add_subdirectory(vulkan)
